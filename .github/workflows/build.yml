@@ -4,18 +4,45 @@ name: Build Android APK
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract source ZIP
+      - name: Find source ZIP
+        id: source
+        shell: bash
         run: |
-          unzip -o BGMI-GFX-Resolution-Fixer-source.zip -d extracted
-          ROOT=$(find extracted -name settings.gradle -o -name settings.gradle.kts | head -n 1 | xargs dirname)
-          echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "Repository files:"
+          ls -la
+          echo "Searching for project ZIP..."
+
+          ZIP="$(find "$GITHUB_WORKSPACE" \
+            -type f -iname '*GFX*Resolution*Fixer*.zip' \
+            -not -path '*/.git/*' | head -n 1)"
+
+          if [ -z "$ZIP" ]; then
+            echo "::error::Source ZIP not found in repository."
+            find "$GITHUB_WORKSPACE" -maxdepth 4 -type f
+            exit 1
+          fi
+
+          echo "Found: $ZIP"
+          echo "zip_path=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Extract source
+        run: |
+          mkdir -p extracted
+          unzip -o "${{ steps.source.outputs.zip_path }}" -d extracted
+
+          find extracted -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \)
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -23,15 +50,33 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
       - name: Build debug APK
-        run: gradle -p "$PROJECT_ROOT" assembleDebug
+        shell: bash
+        run: |
+          SETTINGS="$(find extracted -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            | head -n 1)"
+
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::Gradle settings file not found in ZIP."
+            exit 1
+          fi
+
+          ROOT="$(dirname "$SETTINGS")"
+          echo "Project root: $ROOT"
+
+          if [ -f "$ROOT/gradlew" ]; then
+            chmod +x "$ROOT/gradlew"
+            "$ROOT/gradlew" -p "$ROOT" assembleDebug
+          else
+            echo "::error::Gradle wrapper missing. Cannot safely choose a Gradle version."
+            exit 1
+          fi
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: BGMI-GFX-Resolution-Fixer-debug-apk
-          path: '**/build/outputs/apk/debug/*.apk'
-          
+          path: extracted/**/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
